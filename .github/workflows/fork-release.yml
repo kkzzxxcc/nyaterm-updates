@@ -111,7 +111,7 @@ jobs:
         run: |
           python mirror/scripts/release/verify_native_package.py --target "$env:TARGET" --version "$env:VERSION" --artifact-version "$env:VERSION" --dist mirror/dist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-ChildItem dist | Format-Table Name, Length
+          Get-ChildItem mirror/dist | Format-Table Name, Length
 
       - name: Upload unsigned package
         uses: actions/upload-artifact@v4
