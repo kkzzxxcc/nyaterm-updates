@@ -50,13 +50,27 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Set up Rust (from mirror config)
-        uses: ./mirror/.github/actions/setup-rust
+      - name: Install Windows ATL toolchains
+        shell: pwsh
+        run: ./mirror/scripts/ci/install-msvc-atl.ps1
+
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-          cache-key: fork-release-x64
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-release-x64
           cache-on-failure: 'true'
-          save-cache: always
+          save-if: 'true'
+          workspaces: mirror
 
       - name: Install NSIS
         shell: pwsh
