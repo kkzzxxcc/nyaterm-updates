@@ -1,0 +1,217 @@
+name: Fork release (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 2.0.3 (matches Cargo version in mirror)'
+        required: true
+        type: string
+      mirror_ref:
+        description: 'Mirror branch/tag/commit to build'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  build-windows:
+    name: Build Windows x64 from mirror
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - name: Install deploy key
+        shell: pwsh
+        env:
+          MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+        run: |
+          $key = $env:MIRROR_DEPLOY_KEY -replace "`n", "`r`n"
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.ssh" | Out-Null
+          [IO.File]::WriteAllText("$env:USERPROFILE\.ssh\id_ed25519", $key)
+          "git@github.com kkzzxxcc/nyaterm $(Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub")" | Set-Content "$env:USERPROFILE\.ssh\known_hosts" -Encoding ascii
+          icacls "$env:USERPROFILE\.ssh\id_ed25519" /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
+
+      - name: Checkout deploy repo (release scripts)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout mirror source
+        shell: pwsh
+        env:
+          MIRROR_REF: ${{ inputs.mirror_ref }}
+        run: |
+          git clone --depth 1 --branch $env:MIRROR_REF git@github.com:kkzzxxcc/nyaterm.git mirror
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C mirror log --oneline -1
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust (from mirror config)
+        uses: ./mirror/.github/actions/setup-rust
+        with:
+          targets: x86_64-pc-windows-msvc
+          cache-key: fork-release-x64
+          cache-on-failure: 'true'
+          save-cache: always
+
+      - name: Install NSIS
+        shell: pwsh
+        run: ./mirror/scripts/ci/install-nsis.ps1
+
+      - name: Prepare bundled ConPTY
+        shell: pwsh
+        run: python mirror/scripts/release/prepare_conpty.py
+
+      - name: Package native application (Windows MSVC)
+        shell: pwsh
+        env:
+          NYATERM_ARTIFACT_VERSION: ${{ inputs.version }}
+          NYATERM_VERSION: ${{ inputs.version }}
+          TARGET: x86_64-pc-windows-msvc
+        run: |
+          $linker = (Get-Command link.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          if ($linker -notmatch '\\VC\\Tools\\MSVC\\[^\\]+\\bin\\HostX64\\x64\\link\.exe$') {
+            throw "Expected Visual Studio MSVC linker, got: $linker"
+          }
+          python mirror/scripts/release/package_native.py "$env:TARGET"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify native package
+        shell: pwsh
+        env:
+          TARGET: x86_64-pc-windows-msvc
+          VERSION: ${{ inputs.version }}
+        run: |
+          python mirror/scripts/release/verify_native_package.py --target "$env:TARGET" --version "$env:VERSION" --artifact-version "$env:VERSION" --dist dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Upload unsigned package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NyaTerm-windows-x64-unsigned
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-and-publish:
+    name: Sign and publish to update channel
+    needs: build-windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Install Node.js and minisign
+        run: |
+          sudo apt-get update && sudo apt-get install -y minisign
+          # tauri signer를 위해 node 확보
+          case "$(node --version 2>/dev/null || true)" in
+            v2*) : ;;
+            *) curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs ;;
+          esac
+          node --version
+
+      - name: Download unsigned package
+        uses: actions/download-artifact@v4
+        with:
+          name: NyaTerm-windows-x64-unsigned
+          path: dist
+
+      - name: Decode signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_B64: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_B64 }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "${TAURI_SIGNING_PRIVATE_KEY_B64:-}" && -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]] || {
+            echo 'signing secrets are required' >&2; exit 1;
+          }
+          printf '%s' "${TAURI_SIGNING_PRIVATE_KEY_B64}" | base64 --decode > "${RUNNER_TEMP}/updater.key"
+          chmod 600 "${RUNNER_TEMP}/updater.key"
+
+      - name: Sign artifacts (tauri signer, same as upstream)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/updater.key
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          for f in NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64_portable.zip; do
+            npx --yes @tauri-apps/cli@2.10.0 signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" "$f"
+          done
+          ls -la *.sig
+
+      - name: Generate manifests (fork base-url)
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          TAG="v${VERSION}"
+          python3 scripts/release/generate_release_metadata.py \
+            --dist dist \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --base-url "https://github.com/kkzzxxcc/nyaterm-updates/releases/download" \
+            --notes-file /dev/null \
+            --pub-date "${PUB_DATE}"
+          # latest.json에는 윈도우 x64 두 플랫폼만 남긴다 (빌드하지 않는 플랫폼 제거)
+          python3 - << 'PYEOF'
+          import json
+          m = json.load(open('dist/latest.json'))
+          keep = {}
+          for k in ('windows-x86_64', 'windows-x86_64-portable'):
+              if k in m['platforms']:
+                  keep[k] = m['platforms'][k]
+          assert set(keep) == {'windows-x86_64', 'windows-x86_64-portable'}, keep.keys()
+          m['platforms'] = keep
+          json.dump(m, open('dist/latest.json', 'w'), indent=2)
+          print(json.dumps(m, indent=2))
+          PYEOF
+
+      - name: Publish version release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          TAG="v${VERSION}"
+          ASSETS=(NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64-setup.exe.sig \
+                  NyaTerm_${VERSION}_windows_x64_portable.zip NyaTerm_${VERSION}_windows_x64_portable.zip.sig \
+                  SHA256SUMS)
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --title "NyaTerm ${TAG} (fork build)" \
+            --notes "Fork build of nyakang/nyaterm ${TAG}. Automated update channel for kkzzxxcc." || \
+          gh release upload "$TAG" "${ASSETS[@]}" --clobber
+
+      - name: Refresh channel manifest (latest.json)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="channel"
+          # 채널 릴리즈가 없으면 생성, 있으면 에셋만 교체
+          if ! gh release view "$TAG" --repo kkzzxxcc/nyaterm-updates >/dev/null 2>&1; then
+            gh release create "$TAG" dist/latest.json \
+              --title "Update channel manifest" \
+              --notes "latest.json pointer for the auto-updater. Do not download manually." || \
+            gh release upload "$TAG" dist/latest.json --clobber
+          else
+            gh release upload "$TAG" dist/latest.json --clobber
+          fi
+          # 채널 릴리즈를 최신 릴리즈로 표시 (GitHub API의 /releases/latest 가 이걸 가리키게)
+          gh release edit "$TAG" --latest --repo kkzzxxcc/nyaterm-updates || true
+          echo "=== 게시 완료: v${VERSION} + channel manifest ==="
