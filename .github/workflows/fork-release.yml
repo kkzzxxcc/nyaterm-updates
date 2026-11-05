@@ -161,46 +161,51 @@ jobs:
       - name: Sign artifacts (tauri signer, same as upstream)
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/updater.key
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           cd dist
-          ls -la
+          export TAURI_SIGNING_PRIVATE_KEY="$(cat "${RUNNER_TEMP}/updater.key")"
           for f in NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64_portable.zip; do
             npx --yes @tauri-apps/cli@2.10.0 signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" "$f"
           done
+          unset TAURI_SIGNING_PRIVATE_KEY
           ls -la *.sig
 
-      - name: Generate manifests (fork base-url)
+      - name: Generate latest.json + SHA256SUMS (fork channel)
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          TAG="v${VERSION}"
-          python3 scripts/release/generate_release_metadata.py \
-            --dist dist \
-            --version "${VERSION}" \
-            --tag "${TAG}" \
-            --base-url "https://github.com/kkzzxxcc/nyaterm-updates/releases/download" \
-            --notes-file /dev/null \
-            --pub-date "${PUB_DATE}"
-          # latest.json에는 윈도우 x64 두 플랫폼만 남긴다 (빌드하지 않는 플랫폼 제거)
+          cd dist
           python3 - << 'PYEOF'
-          import json
-          m = json.load(open('dist/latest.json'))
-          keep = {}
-          for k in ('windows-x86_64', 'windows-x86_64-portable'):
-              if k in m['platforms']:
-                  keep[k] = m['platforms'][k]
-          assert set(keep) == {'windows-x86_64', 'windows-x86_64-portable'}, keep.keys()
-          m['platforms'] = keep
-          json.dump(m, open('dist/latest.json', 'w'), indent=2)
-          print(json.dumps(m, indent=2))
+          import base64, datetime, hashlib, json, os, pathlib
+          version = os.environ["VERSION"]
+          base = f"https://github.com/kkzzxxcc/nyaterm-updates/releases/download/v{version}"
+          def entry(fn):
+              p = pathlib.Path(fn)
+              sig = base64.b64encode(pathlib.Path(fn + ".sig").read_bytes()).decode()
+              return {
+                  "url": f"{base}/{fn}",
+                  "signature": sig,
+                  "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+              }
+          manifest = {
+              "version": version,
+              "notes": f"NyaTerm v{version} fork build (kkzzxxcc update channel)",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "platforms": {
+                  "windows-x86_64": entry(f"NyaTerm_{version}_windows_x64-setup.exe"),
+                  "windows-x86_64-portable": entry(f"NyaTerm_{version}_windows_x64_portable.zip"),
+              },
+          }
+          pathlib.Path("latest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          print("latest.json:", json.dumps(manifest)[:300])
           PYEOF
+          sha256sum NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64_portable.zip > SHA256SUMS
+          ls -la
 
       - name: Publish version release
         shell: bash
