@@ -24,9 +24,9 @@ jobs:
         env:
           MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
         run: |
-          $key = $env:MIRROR_DEPLOY_KEY -replace "`n", "`r`n"
           New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.ssh" | Out-Null
-          [IO.File]::WriteAllText("$env:USERPROFILE\.ssh\id_ed25519", $key)
+          # OpenSSH는 LF 키를 요구한다 (CRLF면 invalid format). 마지막 개행만 보장.
+          [IO.File]::WriteAllText("$env:USERPROFILE\.ssh\id_ed25519", ($env:MIRROR_DEPLOY_KEY.TrimEnd() + "`n"))
           $pub = [IO.File]::ReadAllText("$env:USERPROFILE\.ssh\id_ed25519") | Select-String -Pattern "ssh-ed25519 [^\s]+"
           "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" | Set-Content "$env:USERPROFILE\.ssh\known_hosts" -Encoding ascii
           icacls "$env:USERPROFILE\.ssh\id_ed25519" /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
