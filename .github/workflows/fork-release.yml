@@ -76,6 +76,15 @@ jobs:
         shell: pwsh
         run: ./mirror/scripts/ci/install-nsis.ps1
 
+      - name: Install .NET for WiX
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install WiX
+        shell: pwsh
+        run: ./mirror/scripts/ci/install-wix.ps1
+
       - name: Prepare bundled ConPTY
         shell: pwsh
         run: python mirror/scripts/release/prepare_conpty.py
