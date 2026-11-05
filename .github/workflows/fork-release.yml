@@ -109,7 +109,7 @@ jobs:
           TARGET: x86_64-pc-windows-msvc
           VERSION: ${{ inputs.version }}
         run: |
-          python mirror/scripts/release/verify_native_package.py --target "$env:TARGET" --version "$env:VERSION" --artifact-version "$env:VERSION" --dist dist
+          python mirror/scripts/release/verify_native_package.py --target "$env:TARGET" --version "$env:VERSION" --artifact-version "$env:VERSION" --dist mirror/dist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem dist | Format-Table Name, Length
 
