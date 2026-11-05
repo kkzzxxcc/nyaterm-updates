@@ -188,7 +188,7 @@ jobs:
           base = f"https://github.com/kkzzxxcc/nyaterm-updates/releases/download/v{version}"
           def entry(fn):
               p = pathlib.Path(fn)
-              sig = base64.b64encode(pathlib.Path(fn + ".sig").read_bytes()).decode()
+              sig = pathlib.Path(fn + ".sig").read_text(encoding="utf-8").strip()
               return {
                   "url": f"{base}/{fn}",
                   "signature": sig,
