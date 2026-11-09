@@ -243,6 +243,7 @@ jobs:
           else
             gh release upload "$TAG" dist/latest.json --clobber
           fi
-          # 채널 릴리즈를 최신 릴리즈로 표시 (GitHub API의 /releases/latest 가 이걸 가리키게)
-          gh release edit "$TAG" --latest --repo kkzzxxcc/nyaterm-updates || true
+          # 주의: channel 태그는 --latest로 표시하지 않는다 (releases/latest가
+          # 매니페스트 릴리즈를 가리키면 다운로드 링크가 소스 zip만 보이는 문제 발생).
+          # latest 마킹은 버전 릴리즈(vX.Y.Z)에만 유지된다.
           echo "=== 게시 완료: v${VERSION} + channel manifest ==="
