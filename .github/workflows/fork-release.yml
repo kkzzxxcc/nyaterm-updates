@@ -89,18 +89,29 @@ jobs:
         shell: pwsh
         run: python mirror/scripts/release/prepare_conpty.py
 
-      - name: Package native application (Windows MSVC)
+      - name: Setup MSYS2 (for FFmpeg configure/make)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make
+
+      - name: Package native application (Windows MSVC, MSYS2 for FFmpeg)
         shell: pwsh
         env:
           NYATERM_ARTIFACT_VERSION: ${{ inputs.version }}
           NYATERM_VERSION: ${{ inputs.version }}
           TARGET: x86_64-pc-windows-msvc
         run: |
-          $linker = (Get-Command link.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-          if ($linker -notmatch '\\VC\\Tools\\MSVC\\[^\\]+\\bin\\HostX64\\x64\\link\.exe$') {
-            throw "Expected Visual Studio MSVC linker, got: $linker"
-          }
-          python mirror/scripts/release/package_native.py "$env:TARGET"
+          # FFmpeg configure은 MSYS sh로, make는 MSYS make로 돌아야 소스 경로(/d/...)를
+          # 동일한 의미로 해석한다. package_native.py를 MSYS bash 안에서 실행해
+          # configure+make가 같은 경로 규칙을 공유하게 한다. (원본 rust.yml 방식)
+          $msys = "C:\msys64\usr\bin\bash.exe"
+          if (-not (Test-Path $msys)) { throw "msys2 bash not found" }
+          $env:NYATERM_ARTIFACT_VERSION = "${{ inputs.version }}"
+          $env:NYATERM_VERSION = "${{ inputs.version }}"
+          $env:TARGET = "x86_64-pc-windows-msvc"
+          & $msys -lc "cd /d/a/nyaterm-updates/nyaterm-updates && python mirror/scripts/release/package_native.py x86_64-pc-windows-msvc"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify native package
