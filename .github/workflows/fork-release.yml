@@ -103,17 +103,16 @@ jobs:
           NYATERM_VERSION: ${{ inputs.version }}
           TARGET: x86_64-pc-windows-msvc
         run: |
-          # FFmpeg configure+make는 MSYS2 셸이 필요하고, cargo는 MSVC link.exe가 필요하다.
-          # MSYS2는 /usr/bin을 PATH 맨 앞에 넣어 GNU link.exe가 MSVC link.exe를 덮으므로
-          # PATH에서 /usr/bin을 뒤로 물려 cargo 빌드가 MSVC 툴체인을 쓰게 한다.
-          MSVC_BIN="$(ls -d /c/Program\ Files/Microsoft\ Visual\ Studio/2022/Enterprise/VC/Tools/MSVC/*/bin/HostX64/x64 2>/dev/null | sort | tail -1)"
-          if [ -z "$MSVC_BIN" ]; then
-            MSVC_BIN="$(ls -d /c/Program\ Files\ \(x86\)/Microsoft\ Visual\ Studio/2022/*/VC/Tools/MSVC/*/bin/HostX64/x64 2>/dev/null | sort | tail -1)"
-          fi
-          if [ -z "$MSVC_BIN" ]; then echo "MSVC bin dir not found"; exit 1; fi
-          echo "Using MSVC bin: $MSVC_BIN"
-          export PATH="$(cygpath -u "$MSVC_BIN"):$PATH"
-          which link.exe || true
+          set -x
+          # FFmpeg configure+make는 MSYS2 셸이 필요하고 cargo는 MSVC link.exe가 필요하다.
+          # VS 위치는 env(VSINSTALLDIR/VCToolsInstallDir)에서 읽는다(2022/18 둘 다 커버).
+          VCTOOLS="$(cygpath -u "$VCToolsInstallDir")"
+          echo "VCToolsInstallDir=$VCTOOLS"
+          HOSTBIN="$VCTOOLS/bin/HostX64/x64"
+          if [ ! -d "$HOSTBIN" ]; then echo "MSVC HostX64/x64 not found under $VCTOOLS"; ls "$VCTOOLS/bin" || true; exit 1; fi
+          export PATH="$HOSTBIN:$PATH"
+          command -v link.exe
+          link.exe 2>&1 | head -2 || true
           python mirror/scripts/release/package_native.py "$TARGET"
 
       - name: Verify native package
