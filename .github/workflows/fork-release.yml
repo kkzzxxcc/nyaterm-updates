@@ -1,4 +1,4 @@
-name: Fork release (Windows x64)
+name: Fork release (Windows x64 + macOS arm64)
 
 on:
   workflow_dispatch:
@@ -133,9 +133,84 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-macos:
+    name: Build macOS arm64 from mirror
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - name: Install deploy key
+        shell: bash
+        env:
+          MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$MIRROR_DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > ~/.ssh/known_hosts
+
+      - name: Checkout deploy repo (release scripts)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout mirror source
+        shell: bash
+        env:
+          MIRROR_REF: ${{ inputs.mirror_ref }}
+        run: |
+          git clone --depth 1 --branch "$MIRROR_REF" git@github.com:kkzzxxcc/nyaterm.git mirror
+          git -C mirror log --oneline -1
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-release-macos-arm64
+          cache-on-failure: 'true'
+          save-if: 'true'
+          workspaces: mirror
+
+      - name: Install Android native build tools (macOS)
+        shell: bash
+        run: brew install pkg-config
+
+      - name: Package native application (macOS arm64)
+        shell: bash
+        env:
+          NYATERM_ARTIFACT_VERSION: ${{ inputs.version }}
+          NYATERM_VERSION: ${{ inputs.version }}
+          TARGET: aarch64-apple-darwin
+        run: python mirror/scripts/release/package_native.py "$TARGET"
+
+      - name: Verify native package
+        shell: bash
+        env:
+          TARGET: aarch64-apple-darwin
+          VERSION: ${{ inputs.version }}
+        run: |
+          python mirror/scripts/release/verify_native_package.py --target "$TARGET" --version "$VERSION" --artifact-version "$VERSION" --dist mirror/dist
+          ls -la mirror/dist
+
+      - name: Upload unsigned package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NyaTerm-macos-arm64-unsigned
+          path: mirror/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
   sign-and-publish:
     name: Sign and publish to update channel
-    needs: build-windows
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -157,6 +232,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: NyaTerm-windows-x64-unsigned
+          path: dist
+
+      - name: Download macOS package
+        uses: actions/download-artifact@v4
+        with:
+          name: NyaTerm-macos-arm64-unsigned
           path: dist
 
       - name: Decode signing key
@@ -181,8 +262,10 @@ jobs:
           set -euo pipefail
           cd dist
           export TAURI_SIGNING_PRIVATE_KEY="$(cat "${RUNNER_TEMP}/updater.key")"
-          for f in NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64_portable.zip; do
-            npx --yes @tauri-apps/cli@2.10.0 signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" "$f"
+          for f in NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64_portable.zip NyaTerm_${VERSION}_macos_arm64.dmg NyaTerm_${VERSION}_macos_arm64.app.tar.gz; do
+            if [ -f "$f" ]; then
+              npx --yes @tauri-apps/cli@2.10.0 signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" "$f"
+            fi
           done
           unset TAURI_SIGNING_PRIVATE_KEY
           ls -la *.sig
@@ -215,10 +298,14 @@ jobs:
                   "windows-x86_64-portable": entry(f"NyaTerm_{version}_windows_x64_portable.zip"),
               },
           }
+          # macOS arm64 자동업데이트 항목 — app.tar.gz (dmg는 수동설치용)
+          macos_app = f"NyaTerm_{version}_macos_arm64.app.tar.gz"
+          if pathlib.Path(macos_app).is_file():
+              manifest["platforms"]["darwin-aarch64"] = entry(macos_app)
           pathlib.Path("latest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
           print("latest.json:", json.dumps(manifest)[:300])
           PYEOF
-          sha256sum NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64_portable.zip > SHA256SUMS
+          sha256sum NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64_portable.zip NyaTerm_${VERSION}_macos_arm64.dmg NyaTerm_${VERSION}_macos_arm64.app.tar.gz > SHA256SUMS
           ls -la
 
       - name: Publish version release
@@ -232,6 +319,8 @@ jobs:
           TAG="v${VERSION}"
           ASSETS=(NyaTerm_${VERSION}_windows_x64-setup.exe NyaTerm_${VERSION}_windows_x64-setup.exe.sig \
                   NyaTerm_${VERSION}_windows_x64_portable.zip NyaTerm_${VERSION}_windows_x64_portable.zip.sig \
+                  NyaTerm_${VERSION}_macos_arm64.dmg NyaTerm_${VERSION}_macos_arm64.dmg.sig \
+                  NyaTerm_${VERSION}_macos_arm64.app.tar.gz NyaTerm_${VERSION}_macos_arm64.app.tar.gz.sig \
                   SHA256SUMS)
           gh release create "$TAG" "${ASSETS[@]}" \
             --title "NyaTerm ${TAG} (fork build)" \
